@@ -59,7 +59,15 @@ local mouseoverIsEnemy = nil
 local mouseoverTime    = 0
 local MOUSEOVER_GRACE  = 0.6
 
--- ─── GUID → UnitID (no nameplateN in TBC Classic) ───────────────────────────
+-- ─── GUID → UnitID ───────────────────────────────────────────────────────────
+local function UnitFromNamePlateFrame(plate)
+    if not plate then return nil end
+    if plate.namePlateUnitToken then return plate.namePlateUnitToken end
+    if plate.UnitFrame and plate.UnitFrame.unit then return plate.UnitFrame.unit end
+    if plate.unit then return plate.unit end
+    return nil
+end
+
 local function FindUnitByGUID(guid)
     if not guid then return nil end
     if UnitExists("mouseover") and UnitGUID("mouseover") == guid then return "mouseover" end
@@ -78,6 +86,34 @@ local function FindUnitByGUID(guid)
         local u = "raid" .. i
         if UnitExists(u) and UnitGUID(u) == guid then return u end
     end
+
+    -- Modern branches can resolve GUID directly.
+    if type(UnitTokenFromGUID) == "function" then
+        local token = UnitTokenFromGUID(guid)
+        if token and UnitExists(token) and UnitGUID(token) == guid then
+            return token
+        end
+    end
+
+    -- TBC Anniversary fallback: visible nameplates expose unit tokens.
+    if C_NamePlate and C_NamePlate.GetNamePlates then
+        local plates = C_NamePlate.GetNamePlates()
+        if plates then
+            for _, plate in ipairs(plates) do
+                local token = UnitFromNamePlateFrame(plate)
+                if token and UnitExists(token) and UnitGUID(token) == guid then
+                    return token
+                end
+            end
+        end
+    end
+
+    -- Extra fallback in case frame fields differ on some client builds.
+    for i = 1, 40 do
+        local u = "nameplate" .. i
+        if UnitExists(u) and UnitGUID(u) == guid then return u end
+    end
+
     return nil
 end
 
