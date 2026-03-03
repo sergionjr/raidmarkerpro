@@ -1,0 +1,8 @@
+## Interface: 20505
+## Title: RaidMarkerPro
+## Notes: Mouseover dropdown + keybindings to raid-mark targets (TBC Classic Anniversary)
+## Author: You
+## Version: 1.2.0
+## SavedVariables: RaidMarkerProDB
+
+RaidMarkerPro.lua
