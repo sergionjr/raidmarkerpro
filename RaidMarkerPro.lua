@@ -27,6 +27,7 @@ local defaults = {
     dropdownOnEnemy  = true,
     dropdownOnFriend = true,
     toggleMode       = true,
+    tempFocusMode    = false,
     unitPriority     = "mouseover_then_target",
     markerBinds = {
         [1] = "ALT-1", [2] = "ALT-2", [3] = "ALT-3", [4] = "ALT-4",
@@ -115,6 +116,85 @@ local function FindUnitByGUID(guid)
     end
 
     return nil
+end
+
+-- ─── Temporary Focus Fallback ────────────────────────────────────────────────
+local tempFocusActive = false
+local tempFocusPrevGUID = nil
+local tempFocusPrevHad = false
+local tempFocusGUID = nil
+
+local function ResetTempFocusState()
+    tempFocusActive = false
+    tempFocusPrevGUID = nil
+    tempFocusPrevHad = false
+    tempFocusGUID = nil
+end
+
+local function TryFocusUnit(unit)
+    if type(FocusUnit) ~= "function" then return false end
+    if not unit or not UnitExists(unit) then return false end
+    local guid = UnitGUID(unit)
+    if not guid then return false end
+    local ok = pcall(FocusUnit, unit)
+    if not ok then return false end
+    return UnitExists("focus") and UnitGUID("focus") == guid
+end
+
+local function TryClearFocus()
+    if type(ClearFocus) ~= "function" then return false end
+    local ok = pcall(ClearFocus)
+    if not ok then return false end
+    return not UnitExists("focus")
+end
+
+local function ArmTemporaryFocus(unit)
+    ResetTempFocusState()
+    if not unit or not UnitExists(unit) then return false end
+    local guid = UnitGUID(unit)
+    if not guid then return false end
+
+    tempFocusPrevHad = UnitExists("focus")
+    if tempFocusPrevHad then tempFocusPrevGUID = UnitGUID("focus") end
+
+    if tempFocusPrevGUID and tempFocusPrevGUID == guid then
+        dbg("TempFocus: unit already focused")
+        return false
+    end
+
+    if TryFocusUnit(unit) then
+        tempFocusActive = true
+        tempFocusGUID = guid
+        dbg("TempFocus: latched " .. (UnitName("focus") or "?"))
+        return true
+    end
+
+    dbg("TempFocus: focus latch failed")
+    return false
+end
+
+local function FinishTemporaryFocus()
+    if not tempFocusActive then return end
+
+    local prevHad = tempFocusPrevHad
+    local prevGUID = tempFocusPrevGUID
+    ResetTempFocusState()
+
+    if prevHad and prevGUID then
+        local prevUnit = FindUnitByGUID(prevGUID)
+        if prevUnit and TryFocusUnit(prevUnit) then
+            dbg("TempFocus: restored prior focus")
+            return
+        end
+        dbg("TempFocus: prior focus unavailable")
+        return
+    end
+
+    if TryClearFocus() then
+        dbg("TempFocus: cleared focus")
+    else
+        dbg("TempFocus: clear failed")
+    end
 end
 
 -- ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -297,10 +377,17 @@ end
 local dropdown = CreateFrame("Frame", "RaidMarkerProDropdown", UIParent, "UIDropDownMenuTemplate")
 local dropdownGUID = nil
 local dropdownName = nil
+dropdown:HookScript("OnHide", function()
+    FinishTemporaryFocus()
+end)
 
 local function ApplyMarkerByGUID(markerIndex)
     if not CanMark() then return end
     local unit = FindUnitByGUID(dropdownGUID)
+    if not unit and tempFocusActive and UnitExists("focus") and UnitGUID("focus") == tempFocusGUID then
+        unit = "focus"
+        dbg("Dropdown: using temporary focus fallback")
+    end
     if not unit then
         if UnitExists("target") then
             unit = "target"
@@ -372,11 +459,18 @@ local function ShowMarkerDropdown()
     if isEnemy and not DB().dropdownOnEnemy then return end
     if (not isEnemy) and not DB().dropdownOnFriend then return end
 
+    CloseDropDownMenus()
+
+    if DB().tempFocusMode then
+        ArmTemporaryFocus(unit)
+    else
+        ResetTempFocusState()
+    end
+
     dropdownGUID = UnitGUID(unit)
     dropdownName = UnitName(unit) or "Unknown"
     dbg("Dropdown: " .. unit .. " (" .. dropdownName .. ") enemy=" .. tostring(isEnemy))
 
-    CloseDropDownMenus()
     ToggleDropDownMenu(1, nil, dropdown, "cursor", 0, -10)
 end
 
@@ -536,6 +630,15 @@ local function BuildConfigFrame()
     chkFriend:SetScript("OnClick", function(s) DB().dropdownOnFriend = s:GetChecked() and true or false end)
     configFrame.chkFriend = chkFriend
 
+    local chkTempFocus = CreateFrame("CheckButton", nil, configFrame, "UICheckButtonTemplate")
+    chkTempFocus:SetPoint("TOPLEFT", 12, y - 78)
+    chkTempFocus.text:SetText("Temporary focus fallback for dropdown (experimental)")
+    chkTempFocus:SetScript("OnClick", function(s)
+        DB().tempFocusMode = s:GetChecked() and true or false
+        if not DB().tempFocusMode then ResetTempFocusState() end
+    end)
+    configFrame.chkTempFocus = chkTempFocus
+
     -- Bottom Buttons
     local resetBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
     resetBtn:SetSize(130, 24); resetBtn:SetPoint("BOTTOMRIGHT", -12, 10); resetBtn:SetText("Reset Defaults")
@@ -570,6 +673,7 @@ function RaidMarkerPro_RefreshConfig()
     configFrame.chkToggle:SetChecked(DB().toggleMode)
     configFrame.chkEnemy:SetChecked(DB().dropdownOnEnemy)
     configFrame.chkFriend:SetChecked(DB().dropdownOnFriend)
+    configFrame.chkTempFocus:SetChecked(DB().tempFocusMode)
 end
 
 function RaidMarkerPro_OpenConfig()
