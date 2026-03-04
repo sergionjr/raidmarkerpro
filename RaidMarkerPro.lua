@@ -11,7 +11,6 @@ local ADDON_NAME = "RaidMarkerPro"
 local RMP = CreateFrame("Frame", "RaidMarkerProFrame", UIParent)
 RMP:RegisterEvent("ADDON_LOADED")
 RMP:RegisterEvent("PLAYER_LOGIN")
-RMP:RegisterEvent("PLAYER_REGEN_ENABLED")
 RMP:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 
 -- ─── Debug ───────────────────────────────────────────────────────────────────
@@ -28,7 +27,6 @@ local defaults = {
     dropdownOnEnemy  = true,
     dropdownOnFriend = true,
     toggleMode       = true,
-    tempFocusMode    = false,
     unitPriority     = "mouseover_then_target",
     markerBinds = {
         [1] = "ALT-1", [2] = "ALT-2", [3] = "ALT-3", [4] = "ALT-4",
@@ -61,15 +59,7 @@ local mouseoverIsEnemy = nil
 local mouseoverTime    = 0
 local MOUSEOVER_GRACE  = 0.6
 
--- ─── GUID → UnitID ───────────────────────────────────────────────────────────
-local function UnitFromNamePlateFrame(plate)
-    if not plate then return nil end
-    if plate.namePlateUnitToken then return plate.namePlateUnitToken end
-    if plate.UnitFrame and plate.UnitFrame.unit then return plate.UnitFrame.unit end
-    if plate.unit then return plate.unit end
-    return nil
-end
-
+-- ─── GUID → UnitID (no nameplateN in TBC Classic) ───────────────────────────
 local function FindUnitByGUID(guid)
     if not guid then return nil end
     if UnitExists("mouseover") and UnitGUID("mouseover") == guid then return "mouseover" end
@@ -89,39 +79,8 @@ local function FindUnitByGUID(guid)
         if UnitExists(u) and UnitGUID(u) == guid then return u end
     end
 
-    -- Modern branches can resolve GUID directly.
-    if type(UnitTokenFromGUID) == "function" then
-        local token = UnitTokenFromGUID(guid)
-        if token and UnitExists(token) and UnitGUID(token) == guid then
-            return token
-        end
-    end
-
-    -- TBC Anniversary fallback: visible nameplates expose unit tokens.
-    if C_NamePlate and C_NamePlate.GetNamePlates then
-        local plates = C_NamePlate.GetNamePlates()
-        if plates then
-            for _, plate in ipairs(plates) do
-                local token = UnitFromNamePlateFrame(plate)
-                if token and UnitExists(token) and UnitGUID(token) == guid then
-                    return token
-                end
-            end
-        end
-    end
-
-    -- Extra fallback in case frame fields differ on some client builds.
-    for i = 1, 40 do
-        local u = "nameplate" .. i
-        if UnitExists(u) and UnitGUID(u) == guid then return u end
-    end
-
     return nil
 end
-
--- ─── Experimental Target Latch ───────────────────────────────────────────────
--- When enabled, the trigger button uses a secure macro to target @mouseover
--- before opening the dropdown. This provides a stable "target" unit token.
 
 -- ─── Helpers ─────────────────────────────────────────────────────────────────
 local function DB() return RaidMarkerProDB end
@@ -234,6 +193,7 @@ local function RegisterMarkerBindings()
         if k2 then SetBinding(k2) end
         local bind = DB().markerBinds and DB().markerBinds[i]
         if bind and bind ~= "" then
+            SetBinding(bind) -- unbind existing action on this combo first
             SetBindingClick(bind, "RMPMarkerBtn" .. i)
         end
     end
@@ -241,6 +201,29 @@ end
 
 local function SaveAllBindings()
     if GetCurrentBindingSet then SaveBindings(GetCurrentBindingSet()) end
+end
+
+local function NormalizeBind(combo)
+    if not combo then return "" end
+    return strupper(combo)
+end
+
+local function UnbindConflictingAddonBinds(combo, ownerType, ownerIndex)
+    if not combo or combo == "" then return end
+    local norm = NormalizeBind(combo)
+
+    if ownerType ~= "trigger" and NormalizeBind(DB().triggerKey or "") == norm then
+        DB().triggerKey = ""
+    end
+
+    if not DB().markerBinds then DB().markerBinds = {} end
+    for i = 1, #MARKERS do
+        if not (ownerType == "marker" and ownerIndex == i) then
+            if NormalizeBind(DB().markerBinds[i] or "") == norm then
+                DB().markerBinds[i] = ""
+            end
+        end
+    end
 end
 
 -- ─── Keybind Capture ─────────────────────────────────────────────────────────
@@ -315,47 +298,10 @@ end
 local dropdown = CreateFrame("Frame", "RaidMarkerProDropdown", UIParent, "UIDropDownMenuTemplate")
 local dropdownGUID = nil
 local dropdownName = nil
-local dropdownUnitToken = nil
-
-local function FindStableTokenForGUID(guid)
-    if not guid then return nil end
-    if UnitExists("target") and UnitGUID("target") == guid then return "target" end
-    if UnitExists("focus")  and UnitGUID("focus")  == guid then return "focus" end
-    if UnitExists("pet")    and UnitGUID("pet")    == guid then return "pet" end
-    for i = 1, 5 do
-        local u = "boss" .. i
-        if UnitExists(u) and UnitGUID(u) == guid then return u end
-    end
-    for i = 1, 4 do
-        local u = "party" .. i
-        if UnitExists(u) and UnitGUID(u) == guid then return u end
-    end
-    for i = 1, 40 do
-        local u = "raid" .. i
-        if UnitExists(u) and UnitGUID(u) == guid then return u end
-    end
-    for i = 1, 40 do
-        local u = "nameplate" .. i
-        if UnitExists(u) and UnitGUID(u) == guid then return u end
-    end
-    return nil
-end
 
 local function ApplyMarkerByGUID(markerIndex)
     if not CanMark() then return end
-    local unit = nil
-
-    -- Best case: token captured when opening the dropdown is still valid.
-    if dropdownUnitToken and UnitExists(dropdownUnitToken) then
-        if not dropdownGUID or UnitGUID(dropdownUnitToken) == dropdownGUID then
-            unit = dropdownUnitToken
-            dbg("Dropdown: using cached token " .. unit)
-        end
-    end
-
-    if not unit then
-        unit = FindUnitByGUID(dropdownGUID)
-    end
+    local unit = FindUnitByGUID(dropdownGUID)
     if not unit then
         if UnitExists("target") then
             unit = "target"
@@ -400,26 +346,6 @@ UIDropDownMenu_Initialize(dropdown, InitDropdown, "MENU")
 
 -- ─── Dropdown Trigger ────────────────────────────────────────────────────────
 local triggerBtn
-local pendingTriggerSecureUpdate = false
-
-local function UpdateTriggerSecureAction()
-    if not triggerBtn then return end
-    if InCombatLockdown and InCombatLockdown() then
-        pendingTriggerSecureUpdate = true
-        return
-    end
-
-    if DB().tempFocusMode then
-        triggerBtn:SetAttribute("type1", "macro")
-        triggerBtn:SetAttribute("macrotext1", "/target [@mouseover,exists,nodead]")
-    else
-        triggerBtn:SetAttribute("type1", nil)
-        triggerBtn:SetAttribute("macrotext1", nil)
-        triggerBtn:SetAttribute("type", nil)
-        triggerBtn:SetAttribute("macrotext", nil)
-    end
-    pendingTriggerSecureUpdate = false
-end
 
 local function ShowMarkerDropdown()
     if not CanMark() then return end
@@ -451,7 +377,6 @@ local function ShowMarkerDropdown()
 
     dropdownGUID = UnitGUID(unit)
     dropdownName = UnitName(unit) or "Unknown"
-    dropdownUnitToken = FindStableTokenForGUID(dropdownGUID) or unit
     dbg("Dropdown: " .. unit .. " (" .. dropdownName .. ") enemy=" .. tostring(isEnemy))
 
     ToggleDropDownMenu(1, nil, dropdown, "cursor", 0, -10)
@@ -461,13 +386,11 @@ local function CreateTriggerButton()
     if triggerBtn then return end
     triggerBtn = CreateFrame("Button", "RMPTriggerBtn", UIParent, "SecureActionButtonTemplate")
     triggerBtn:RegisterForClicks("AnyDown", "AnyUp")
-    -- Keep SecureActionButtonTemplate's internal click handler intact, then run addon logic.
-    triggerBtn:HookScript("OnClick", function(_, _, down)
+    triggerBtn:SetScript("OnClick", function(_, _, down)
         if ShouldHandleSecureClick(down) then
             ShowMarkerDropdown()
         end
     end)
-    UpdateTriggerSecureAction()
 end
 
 local function RegisterTriggerBinding()
@@ -476,9 +399,9 @@ local function RegisterTriggerBinding()
     if k2 then SetBinding(k2) end
     local bind = DB().triggerKey
     if bind and bind ~= "" then
+        SetBinding(bind) -- unbind existing action on this combo first
         SetBindingClick(bind, "RMPTriggerBtn")
     end
-    UpdateTriggerSecureAction()
 end
 
 -- ─── Config Frame ────────────────────────────────────────────────────────────
@@ -550,8 +473,10 @@ local function BuildConfigFrame()
     local trigCapBtn = CreateCaptureButton(configFrame, 160)
     trigCapBtn:SetPoint("TOPLEFT", trigHint, "BOTTOMLEFT", 0, -4)
     trigCapBtn.onCapture = function(combo)
+        UnbindConflictingAddonBinds(combo, "trigger")
         DB().triggerKey = combo
-        RegisterTriggerBinding(); SaveAllBindings()
+        RegisterTriggerBinding(); RegisterMarkerBindings(); SaveAllBindings()
+        RaidMarkerPro_RefreshConfig()
     end
     configFrame.trigCapBtn = trigCapBtn
     local trigClearBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
@@ -585,9 +510,11 @@ local function BuildConfigFrame()
         capBtn:SetPoint("LEFT", lbl, "RIGHT", 4, 0)
         capBtn.idx = i
         capBtn.onCapture = function(combo)
+            UnbindConflictingAddonBinds(combo, "marker", i)
             if not DB().markerBinds then DB().markerBinds = {} end
             DB().markerBinds[i] = combo
-            RegisterMarkerBindings(); SaveAllBindings()
+            RegisterTriggerBinding(); RegisterMarkerBindings(); SaveAllBindings()
+            RaidMarkerPro_RefreshConfig()
         end
         local clrBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
         clrBtn:SetSize(50, 22); clrBtn:SetPoint("LEFT", capBtn, "RIGHT", 3, 0); clrBtn:SetText("Clear")
@@ -619,15 +546,6 @@ local function BuildConfigFrame()
     chkFriend.text:SetText("Dropdown on friendly units")
     chkFriend:SetScript("OnClick", function(s) DB().dropdownOnFriend = s:GetChecked() and true or false end)
     configFrame.chkFriend = chkFriend
-
-    local chkTempFocus = CreateFrame("CheckButton", nil, configFrame, "UICheckButtonTemplate")
-    chkTempFocus:SetPoint("TOPLEFT", 12, y - 78)
-    chkTempFocus.text:SetText("Experimental: target mouseover before dropdown")
-    chkTempFocus:SetScript("OnClick", function(s)
-        DB().tempFocusMode = s:GetChecked() and true or false
-        UpdateTriggerSecureAction()
-    end)
-    configFrame.chkTempFocus = chkTempFocus
 
     -- Bottom Buttons
     local resetBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
@@ -663,7 +581,6 @@ function RaidMarkerPro_RefreshConfig()
     configFrame.chkToggle:SetChecked(DB().toggleMode)
     configFrame.chkEnemy:SetChecked(DB().dropdownOnEnemy)
     configFrame.chkFriend:SetChecked(DB().dropdownOnFriend)
-    configFrame.chkTempFocus:SetChecked(DB().tempFocusMode)
 end
 
 function RaidMarkerPro_OpenConfig()
@@ -711,8 +628,6 @@ RMP:SetScript("OnEvent", function(self, event, ...)
         print("|cff00ccffRaidMarkerPro|r loaded — |cffffcc00/rmp|r settings. " ..
               "|cffffcc00" .. (DB().triggerKey or "ALT-Q") .. "|r dropdown, " ..
               "|cffffcc00ALT-1|r–|cffffcc008|r direct.")
-    elseif event == "PLAYER_REGEN_ENABLED" then
-        if pendingTriggerSecureUpdate then UpdateTriggerSecureAction() end
     elseif event == "UPDATE_MOUSEOVER_UNIT" then
         if UnitExists("mouseover") then
             mouseoverGUID    = UnitGUID("mouseover")
