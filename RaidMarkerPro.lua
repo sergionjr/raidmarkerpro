@@ -119,9 +119,9 @@ local function FindUnitByGUID(guid)
     return nil
 end
 
--- ─── Temporary Focus Fallback ────────────────────────────────────────────────
--- IMPORTANT: Focus is latched via a secure macro on the trigger button.
--- Do not call FocusUnit/ClearFocus from normal Lua here (protected in combat).
+-- ─── Experimental Target Latch ───────────────────────────────────────────────
+-- When enabled, the trigger button uses a secure macro to target @mouseover
+-- before opening the dropdown. This provides a stable "target" unit token.
 
 -- ─── Helpers ─────────────────────────────────────────────────────────────────
 local function DB() return RaidMarkerProDB end
@@ -198,6 +198,14 @@ local function ApplyMarker(markerIndex)
     SetRaidTarget(unit, markerIndex)
 end
 
+local function ShouldHandleSecureClick(down)
+    if down == nil then return true end
+    if GetCVarBool and GetCVarBool("ActionButtonUseKeyDown") then
+        return down
+    end
+    return not down
+end
+
 -- ─── Per-Marker Buttons ──────────────────────────────────────────────────────
 -- Inherit SecureActionButtonTemplate so SetBindingClick works properly.
 -- OnClick handler calls SetRaidTarget directly (not protected, no macrotext needed).
@@ -210,7 +218,11 @@ local function CreateMarkerButtons()
         local idx = m.index
         local btn = CreateFrame("Button", "RMPMarkerBtn" .. i, UIParent, "SecureActionButtonTemplate")
         btn:RegisterForClicks("AnyDown", "AnyUp")
-        btn:SetScript("OnClick", function() ApplyMarker(idx) end)
+        btn:SetScript("OnClick", function(_, _, down)
+            if ShouldHandleSecureClick(down) then
+                ApplyMarker(idx)
+            end
+        end)
         markerButtons[i] = btn
     end
 end
@@ -305,6 +317,30 @@ local dropdownGUID = nil
 local dropdownName = nil
 local dropdownUnitToken = nil
 
+local function FindStableTokenForGUID(guid)
+    if not guid then return nil end
+    if UnitExists("target") and UnitGUID("target") == guid then return "target" end
+    if UnitExists("focus")  and UnitGUID("focus")  == guid then return "focus" end
+    if UnitExists("pet")    and UnitGUID("pet")    == guid then return "pet" end
+    for i = 1, 5 do
+        local u = "boss" .. i
+        if UnitExists(u) and UnitGUID(u) == guid then return u end
+    end
+    for i = 1, 4 do
+        local u = "party" .. i
+        if UnitExists(u) and UnitGUID(u) == guid then return u end
+    end
+    for i = 1, 40 do
+        local u = "raid" .. i
+        if UnitExists(u) and UnitGUID(u) == guid then return u end
+    end
+    for i = 1, 40 do
+        local u = "nameplate" .. i
+        if UnitExists(u) and UnitGUID(u) == guid then return u end
+    end
+    return nil
+end
+
 local function ApplyMarkerByGUID(markerIndex)
     if not CanMark() then return end
     local unit = nil
@@ -319,10 +355,6 @@ local function ApplyMarkerByGUID(markerIndex)
 
     if not unit then
         unit = FindUnitByGUID(dropdownGUID)
-    end
-    if not unit and DB().tempFocusMode and UnitExists("focus") and UnitGUID("focus") == dropdownGUID then
-        unit = "focus"
-        dbg("Dropdown: using temporary focus fallback")
     end
     if not unit then
         if UnitExists("target") then
@@ -379,7 +411,7 @@ local function UpdateTriggerSecureAction()
 
     if DB().tempFocusMode then
         triggerBtn:SetAttribute("type1", "macro")
-        triggerBtn:SetAttribute("macrotext1", "/focus [@mouseover,exists,nodead][@target,exists,nodead]")
+        triggerBtn:SetAttribute("macrotext1", "/target [@mouseover,exists,nodead]")
     else
         triggerBtn:SetAttribute("type1", nil)
         triggerBtn:SetAttribute("macrotext1", nil)
@@ -419,7 +451,7 @@ local function ShowMarkerDropdown()
 
     dropdownGUID = UnitGUID(unit)
     dropdownName = UnitName(unit) or "Unknown"
-    dropdownUnitToken = unit
+    dropdownUnitToken = FindStableTokenForGUID(dropdownGUID) or unit
     dbg("Dropdown: " .. unit .. " (" .. dropdownName .. ") enemy=" .. tostring(isEnemy))
 
     ToggleDropDownMenu(1, nil, dropdown, "cursor", 0, -10)
@@ -430,7 +462,11 @@ local function CreateTriggerButton()
     triggerBtn = CreateFrame("Button", "RMPTriggerBtn", UIParent, "SecureActionButtonTemplate")
     triggerBtn:RegisterForClicks("AnyDown", "AnyUp")
     -- Keep SecureActionButtonTemplate's internal click handler intact, then run addon logic.
-    triggerBtn:HookScript("OnClick", ShowMarkerDropdown)
+    triggerBtn:HookScript("OnClick", function(_, _, down)
+        if ShouldHandleSecureClick(down) then
+            ShowMarkerDropdown()
+        end
+    end)
     UpdateTriggerSecureAction()
 end
 
@@ -586,7 +622,7 @@ local function BuildConfigFrame()
 
     local chkTempFocus = CreateFrame("CheckButton", nil, configFrame, "UICheckButtonTemplate")
     chkTempFocus:SetPoint("TOPLEFT", 12, y - 78)
-    chkTempFocus.text:SetText("Temporary focus fallback for dropdown (experimental)")
+    chkTempFocus.text:SetText("Experimental: target mouseover before dropdown")
     chkTempFocus:SetScript("OnClick", function(s)
         DB().tempFocusMode = s:GetChecked() and true or false
         UpdateTriggerSecureAction()
