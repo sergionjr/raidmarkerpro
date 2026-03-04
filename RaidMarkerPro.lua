@@ -11,6 +11,7 @@ local ADDON_NAME = "RaidMarkerPro"
 local RMP = CreateFrame("Frame", "RaidMarkerProFrame", UIParent)
 RMP:RegisterEvent("ADDON_LOADED")
 RMP:RegisterEvent("PLAYER_LOGIN")
+RMP:RegisterEvent("PLAYER_REGEN_ENABLED")
 RMP:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 
 -- ─── Debug ───────────────────────────────────────────────────────────────────
@@ -119,83 +120,8 @@ local function FindUnitByGUID(guid)
 end
 
 -- ─── Temporary Focus Fallback ────────────────────────────────────────────────
-local tempFocusActive = false
-local tempFocusPrevGUID = nil
-local tempFocusPrevHad = false
-local tempFocusGUID = nil
-
-local function ResetTempFocusState()
-    tempFocusActive = false
-    tempFocusPrevGUID = nil
-    tempFocusPrevHad = false
-    tempFocusGUID = nil
-end
-
-local function TryFocusUnit(unit)
-    if type(FocusUnit) ~= "function" then return false end
-    if not unit or not UnitExists(unit) then return false end
-    local guid = UnitGUID(unit)
-    if not guid then return false end
-    local ok = pcall(FocusUnit, unit)
-    if not ok then return false end
-    return UnitExists("focus") and UnitGUID("focus") == guid
-end
-
-local function TryClearFocus()
-    if type(ClearFocus) ~= "function" then return false end
-    local ok = pcall(ClearFocus)
-    if not ok then return false end
-    return not UnitExists("focus")
-end
-
-local function ArmTemporaryFocus(unit)
-    ResetTempFocusState()
-    if not unit or not UnitExists(unit) then return false end
-    local guid = UnitGUID(unit)
-    if not guid then return false end
-
-    tempFocusPrevHad = UnitExists("focus")
-    if tempFocusPrevHad then tempFocusPrevGUID = UnitGUID("focus") end
-
-    if tempFocusPrevGUID and tempFocusPrevGUID == guid then
-        dbg("TempFocus: unit already focused")
-        return false
-    end
-
-    if TryFocusUnit(unit) then
-        tempFocusActive = true
-        tempFocusGUID = guid
-        dbg("TempFocus: latched " .. (UnitName("focus") or "?"))
-        return true
-    end
-
-    dbg("TempFocus: focus latch failed")
-    return false
-end
-
-local function FinishTemporaryFocus()
-    if not tempFocusActive then return end
-
-    local prevHad = tempFocusPrevHad
-    local prevGUID = tempFocusPrevGUID
-    ResetTempFocusState()
-
-    if prevHad and prevGUID then
-        local prevUnit = FindUnitByGUID(prevGUID)
-        if prevUnit and TryFocusUnit(prevUnit) then
-            dbg("TempFocus: restored prior focus")
-            return
-        end
-        dbg("TempFocus: prior focus unavailable")
-        return
-    end
-
-    if TryClearFocus() then
-        dbg("TempFocus: cleared focus")
-    else
-        dbg("TempFocus: clear failed")
-    end
-end
+-- IMPORTANT: Focus is latched via a secure macro on the trigger button.
+-- Do not call FocusUnit/ClearFocus from normal Lua here (protected in combat).
 
 -- ─── Helpers ─────────────────────────────────────────────────────────────────
 local function DB() return RaidMarkerProDB end
@@ -377,14 +303,11 @@ end
 local dropdown = CreateFrame("Frame", "RaidMarkerProDropdown", UIParent, "UIDropDownMenuTemplate")
 local dropdownGUID = nil
 local dropdownName = nil
-dropdown:HookScript("OnHide", function()
-    FinishTemporaryFocus()
-end)
 
 local function ApplyMarkerByGUID(markerIndex)
     if not CanMark() then return end
     local unit = FindUnitByGUID(dropdownGUID)
-    if not unit and tempFocusActive and UnitExists("focus") and UnitGUID("focus") == tempFocusGUID then
+    if not unit and DB().tempFocusMode and UnitExists("focus") and UnitGUID("focus") == dropdownGUID then
         unit = "focus"
         dbg("Dropdown: using temporary focus fallback")
     end
@@ -432,6 +355,24 @@ UIDropDownMenu_Initialize(dropdown, InitDropdown, "MENU")
 
 -- ─── Dropdown Trigger ────────────────────────────────────────────────────────
 local triggerBtn
+local pendingTriggerSecureUpdate = false
+
+local function UpdateTriggerSecureAction()
+    if not triggerBtn then return end
+    if InCombatLockdown and InCombatLockdown() then
+        pendingTriggerSecureUpdate = true
+        return
+    end
+
+    if DB().tempFocusMode then
+        triggerBtn:SetAttribute("type", "macro")
+        triggerBtn:SetAttribute("macrotext", "/focus [@mouseover,exists,nodead][@target,exists,nodead]")
+    else
+        triggerBtn:SetAttribute("type", nil)
+        triggerBtn:SetAttribute("macrotext", nil)
+    end
+    pendingTriggerSecureUpdate = false
+end
 
 local function ShowMarkerDropdown()
     if not CanMark() then return end
@@ -461,12 +402,6 @@ local function ShowMarkerDropdown()
 
     CloseDropDownMenus()
 
-    if DB().tempFocusMode then
-        ArmTemporaryFocus(unit)
-    else
-        ResetTempFocusState()
-    end
-
     dropdownGUID = UnitGUID(unit)
     dropdownName = UnitName(unit) or "Unknown"
     dbg("Dropdown: " .. unit .. " (" .. dropdownName .. ") enemy=" .. tostring(isEnemy))
@@ -479,6 +414,7 @@ local function CreateTriggerButton()
     triggerBtn = CreateFrame("Button", "RMPTriggerBtn", UIParent, "SecureActionButtonTemplate")
     triggerBtn:RegisterForClicks("AnyDown", "AnyUp")
     triggerBtn:SetScript("OnClick", ShowMarkerDropdown)
+    UpdateTriggerSecureAction()
 end
 
 local function RegisterTriggerBinding()
@@ -489,6 +425,7 @@ local function RegisterTriggerBinding()
     if bind and bind ~= "" then
         SetBindingClick(bind, "RMPTriggerBtn")
     end
+    UpdateTriggerSecureAction()
 end
 
 -- ─── Config Frame ────────────────────────────────────────────────────────────
@@ -635,7 +572,7 @@ local function BuildConfigFrame()
     chkTempFocus.text:SetText("Temporary focus fallback for dropdown (experimental)")
     chkTempFocus:SetScript("OnClick", function(s)
         DB().tempFocusMode = s:GetChecked() and true or false
-        if not DB().tempFocusMode then ResetTempFocusState() end
+        UpdateTriggerSecureAction()
     end)
     configFrame.chkTempFocus = chkTempFocus
 
@@ -721,6 +658,8 @@ RMP:SetScript("OnEvent", function(self, event, ...)
         print("|cff00ccffRaidMarkerPro|r loaded — |cffffcc00/rmp|r settings. " ..
               "|cffffcc00" .. (DB().triggerKey or "ALT-Q") .. "|r dropdown, " ..
               "|cffffcc00ALT-1|r–|cffffcc008|r direct.")
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if pendingTriggerSecureUpdate then UpdateTriggerSecureAction() end
     elseif event == "UPDATE_MOUSEOVER_UNIT" then
         if UnitExists("mouseover") then
             mouseoverGUID    = UnitGUID("mouseover")
