@@ -303,10 +303,23 @@ end
 local dropdown = CreateFrame("Frame", "RaidMarkerProDropdown", UIParent, "UIDropDownMenuTemplate")
 local dropdownGUID = nil
 local dropdownName = nil
+local dropdownUnitToken = nil
 
 local function ApplyMarkerByGUID(markerIndex)
     if not CanMark() then return end
-    local unit = FindUnitByGUID(dropdownGUID)
+    local unit = nil
+
+    -- Best case: token captured when opening the dropdown is still valid.
+    if dropdownUnitToken and UnitExists(dropdownUnitToken) then
+        if not dropdownGUID or UnitGUID(dropdownUnitToken) == dropdownGUID then
+            unit = dropdownUnitToken
+            dbg("Dropdown: using cached token " .. unit)
+        end
+    end
+
+    if not unit then
+        unit = FindUnitByGUID(dropdownGUID)
+    end
     if not unit and DB().tempFocusMode and UnitExists("focus") and UnitGUID("focus") == dropdownGUID then
         unit = "focus"
         dbg("Dropdown: using temporary focus fallback")
@@ -365,9 +378,11 @@ local function UpdateTriggerSecureAction()
     end
 
     if DB().tempFocusMode then
-        triggerBtn:SetAttribute("type", "macro")
-        triggerBtn:SetAttribute("macrotext", "/focus [@mouseover,exists,nodead][@target,exists,nodead]")
+        triggerBtn:SetAttribute("type1", "macro")
+        triggerBtn:SetAttribute("macrotext1", "/focus [@mouseover,exists,nodead][@target,exists,nodead]")
     else
+        triggerBtn:SetAttribute("type1", nil)
+        triggerBtn:SetAttribute("macrotext1", nil)
         triggerBtn:SetAttribute("type", nil)
         triggerBtn:SetAttribute("macrotext", nil)
     end
@@ -404,6 +419,7 @@ local function ShowMarkerDropdown()
 
     dropdownGUID = UnitGUID(unit)
     dropdownName = UnitName(unit) or "Unknown"
+    dropdownUnitToken = unit
     dbg("Dropdown: " .. unit .. " (" .. dropdownName .. ") enemy=" .. tostring(isEnemy))
 
     ToggleDropDownMenu(1, nil, dropdown, "cursor", 0, -10)
@@ -413,7 +429,8 @@ local function CreateTriggerButton()
     if triggerBtn then return end
     triggerBtn = CreateFrame("Button", "RMPTriggerBtn", UIParent, "SecureActionButtonTemplate")
     triggerBtn:RegisterForClicks("AnyDown", "AnyUp")
-    triggerBtn:SetScript("OnClick", ShowMarkerDropdown)
+    -- Keep SecureActionButtonTemplate's internal click handler intact, then run addon logic.
+    triggerBtn:HookScript("OnClick", ShowMarkerDropdown)
     UpdateTriggerSecureAction()
 end
 
